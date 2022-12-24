@@ -382,8 +382,11 @@ fn show_correct_words(mut ev_word_accepted: EventReader<WordAcceptedEvent>,
                     ) {
     for ev in ev_word_accepted.iter() {
         for (mut text, _word_list) in word_list.iter_mut() {
-            let style = text.sections[0].style.clone();
-            let word = String::from("\n") + ev.word.as_str() + if ev.pangram { " *" } else { "" };
+            let mut style = text.sections[0].style.clone();
+            if ev.pangram {
+                style.color = Color::CYAN;
+            }
+            let word = String::from("\n") + ev.word.as_str();
             text.sections.push(TextSection::new(word, style));
             gamestate.correct_words.push(ev.word.clone().to_ascii_lowercase());
 
