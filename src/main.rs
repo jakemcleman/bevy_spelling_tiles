@@ -7,7 +7,7 @@ fn main() {
     App::new()
         .insert_resource(Msaa { samples: 4 })
         .insert_resource(WordList { all_valid_words: Vec::new(), potential_pangrams: Vec::new() })
-        .insert_resource(GameState { target_string: String::new(), target_bits: 0, required_letter: ' ', required_bit: 0 })
+        .insert_resource(GameState { target_string: String::new(), target_bits: 0, required_letter: ' ', required_bit: 0, correct_words: Vec::new() })
         .add_event::<LetterAcceptedEvent>()
         .add_event::<WordAcceptedEvent>()
         .add_event::<WordRejectedEvent>()
@@ -21,6 +21,7 @@ fn main() {
         .add_system(guess_word)
         .add_system(wrong_word_hint)
         .add_system(show_correct_words)
+        .add_system(squish_effects)
         .run();
 }
 
@@ -36,6 +37,7 @@ struct GameState {
     target_bits: u32,
     required_letter: char,
     required_bit: u32,
+    correct_words: Vec<String>,
 }
 
 #[derive(Component)]
@@ -49,12 +51,31 @@ struct TriedWord {
 }
 
 #[derive(Component)]
-struct CorrectWordsList {
-    scored: Vec<String>,
-}
+struct CorrectWordsList {}
 
 #[derive(Component)]
 struct HintText {}
+
+#[derive(Component)]
+struct SquishEffect {
+    attack_duration: f32,
+    sustain_duration: f32,
+    decay_duration: f32,
+    elapsed: f32,
+    total_time: f32,
+    base_scale: Vec3,
+    squish_multiplier: Vec3,
+}
+
+impl SquishEffect {
+    fn new(base_scale: Vec3, squish_multiplier: Vec3, attack_duration: f32, sustain_duration: f32, decay_duration: f32) -> SquishEffect {
+        SquishEffect { attack_duration, sustain_duration, decay_duration, elapsed: 0., total_time: attack_duration + sustain_duration + decay_duration, base_scale, squish_multiplier }
+    }
+
+    fn reset(&mut self) {
+        self.elapsed = 0.0;
+    }
+}
 
 
 struct LetterAcceptedEvent {
@@ -163,7 +184,12 @@ fn check_word(word: &str, gamestate: &GameState, wordlist: &WordList) -> (bool, 
         let word_bits = word_to_bits(word);
         if (word_bits & gamestate.required_bit != 0) && ((word_bits ^ gamestate.target_bits) & word_bits == 0) {
             if wordlist.all_valid_words.contains(&String::from(word.to_ascii_lowercase())) {
-                (true, String::from("hap :)"), (word_bits.count_ones() == 7))
+                if gamestate.correct_words.contains(&String::from(word.to_ascii_lowercase())) {
+                    (false, String::from("was already found"), false)
+                }
+                else {
+                    (true, String::from("hap :)"), (word_bits.count_ones() == 7))
+                }
             }
             else {
                 (false, String::from("is not in word list"), false)
@@ -221,7 +247,7 @@ fn setup_shapes(mut commands: Commands, asset_server: Res<AssetServer>, gamestat
         Transform::from_translation(center),
     )).insert(LetterTile {
         letter: letters[0] as char
-    });
+    }).insert(SquishEffect::new(Vec3::ONE, Vec3::splat(0.8), 0.0, 0.0, 0.1));
     commands.spawn(Text2dBundle{
         text: Text::from_section(letters[0] as char, tiles_text_style.clone()).with_alignment(text_alignment),
         transform: Transform::from_translation(center + Vec3::new(0., 0., 1.)),
@@ -247,9 +273,7 @@ fn setup_shapes(mut commands: Commands, asset_server: Res<AssetServer>, gamestat
         text: Text::from_section("Found Words: 0", info_text_style.clone()).with_alignment(TextAlignment::TOP_CENTER),
         transform: Transform::from_translation(center + Vec3::new(6. * radius, 4.2 * radius, 1.)),
         ..default()
-    }).insert(CorrectWordsList {
-        scored: Vec::new(),
-    });
+    }).insert(CorrectWordsList { });
 
     for i in 0..sides {
         let (x_space, y_space) = get_spacings(sides, radius + spacing, i);
@@ -262,7 +286,7 @@ fn setup_shapes(mut commands: Commands, asset_server: Res<AssetServer>, gamestat
             Transform::from_translation(center + Vec3::new(x_space, y_space, 0.0)),
         )).insert(LetterTile {
             letter: letters[i + 1] as char
-        });
+        }).insert(SquishEffect::new(Vec3::ONE, Vec3::splat(0.8), 0.0, 0.0, 0.1));
         commands.spawn(Text2dBundle{
             text: Text::from_section(letters[i + 1] as char, tiles_text_style.clone()).with_alignment(text_alignment),
             transform: Transform::from_translation(center + Vec3::new(x_space, y_space, 1.)),
@@ -274,12 +298,12 @@ fn setup_shapes(mut commands: Commands, asset_server: Res<AssetServer>, gamestat
 
 fn chose_letter(mut char_evr: EventReader<ReceivedCharacter>,
                 mut ev_letter_accepted: EventWriter<LetterAcceptedEvent>,
-                letter_tiles: Query<&LetterTile>) {
+                mut letter_tiles: Query<(&LetterTile, &mut SquishEffect)>) {
     for ev in char_evr.iter() {
-        for tile in letter_tiles.iter() {
+        for (tile, mut squish) in letter_tiles.iter_mut() {
             if ev.char.to_ascii_uppercase() == tile.letter.to_ascii_uppercase() {
                 ev_letter_accepted.send(LetterAcceptedEvent { letter: ev.char });
-                
+                squish.reset();
                 break;
             }
         }
@@ -287,11 +311,22 @@ fn chose_letter(mut char_evr: EventReader<ReceivedCharacter>,
 }
 
 fn add_letter(mut word_guess: Query<(&mut Text, &mut TriedWord)>, 
-              mut ev_letter_accepted: EventReader<LetterAcceptedEvent>) {
+              mut ev_letter_accepted: EventReader<LetterAcceptedEvent>,
+              game_state: Res<GameState>,) {
     for ev in ev_letter_accepted.iter() {
         let (mut text, mut tried_word) = word_guess.get_single_mut().unwrap();
         tried_word.current.push(ev.letter.to_ascii_uppercase());
-        text.sections[0].value = tried_word.current.clone();
+        let mut style = text.sections[0].style.clone();
+        if ev.letter.to_ascii_uppercase() == game_state.required_letter {
+            style.color = Color::CYAN;
+        }
+        else {
+            style.color = Color::WHITE;
+        }
+        if text.sections[0].value == "_" {
+            text.sections.clear();
+        }
+        text.sections.push(TextSection { value: ev.letter.to_ascii_uppercase().to_string(), style });
         //println!("got a letter! {0} Word so far is {1}", ev.letter, tried_word.current);
     }
 }
@@ -315,13 +350,20 @@ fn guess_word(mut word_guess: Query<(&mut Text, &mut TriedWord)>,
             ev_word_rejected.send(WordRejectedEvent { word: tried_word.current.clone(), reason: reason });
         }
 
-        text.sections[0].value = String::new();
+        text.sections[0].value = String::from("_");
+        text.sections[0].style.color = Color::WHITE;
+        text.sections.resize(1, TextSection::default());
         tried_word.current = String::new();
     }
     
     if keys.just_pressed(KeyCode::Back) {
         tried_word.current.pop();
-        text.sections[0].value = tried_word.current.clone();
+        if text.sections.len() == 1 {
+            text.sections[0].value = String::from("_");
+            text.sections[0].style.color = Color::WHITE;
+        } else {
+            text.sections.pop();
+        }
     }
 }
 
@@ -335,16 +377,53 @@ fn wrong_word_hint(mut ev_word_rejected: EventReader<WordRejectedEvent>,
 }
 
 fn show_correct_words(mut ev_word_accepted: EventReader<WordAcceptedEvent>,
-                      mut word_list: Query<(&mut Text, &mut CorrectWordsList)>,
+                      mut word_list: Query<(&mut Text, &CorrectWordsList)>,
+                      mut gamestate: ResMut<GameState>,
                     ) {
     for ev in ev_word_accepted.iter() {
-        for (mut text, mut word_list) in word_list.iter_mut() {
+        for (mut text, _word_list) in word_list.iter_mut() {
             let style = text.sections[0].style.clone();
             let word = String::from("\n") + ev.word.as_str() + if ev.pangram { " *" } else { "" };
             text.sections.push(TextSection::new(word, style));
-            word_list.scored.push(ev.word.clone());
+            gamestate.correct_words.push(ev.word.clone().to_ascii_lowercase());
 
-            text.sections[0].value = format!("Found Words: {}", word_list.scored.len());
+            text.sections[0].value = format!("Found Words: {}", gamestate.correct_words.len());
         }
     }
 }
+
+fn squish_effects(mut squishees: Query<(&mut Transform, &mut SquishEffect)>, time: Res<Time>) {
+    for (mut transform, mut squish) in squishees.iter_mut() {
+        if squish.elapsed < squish.total_time {
+            squish.elapsed += time.delta_seconds();
+            let mut adj_elapsed = squish.elapsed;
+            if adj_elapsed > squish.attack_duration {
+                adj_elapsed -= squish.attack_duration;
+
+                if adj_elapsed > squish.sustain_duration {
+                    adj_elapsed -= squish.sustain_duration;
+
+                    if adj_elapsed > squish.decay_duration {
+                        // animation finished, reset scale
+                        transform.scale = squish.base_scale;
+                    }
+                    else {
+                        // in decay phase, do lerp out
+                        let t = adj_elapsed / squish.decay_duration;
+                        transform.scale = squish.base_scale.lerp(squish.squish_multiplier, 1.0 - t);
+                    }
+                }
+                else {
+                    // in sustain phase, hold
+                    transform.scale = squish.base_scale * squish.squish_multiplier;
+                }
+            }
+            else {
+                // in attack phase, do lerp in
+                let t = adj_elapsed / squish.attack_duration;
+                transform.scale = squish.base_scale.lerp(squish.squish_multiplier, t);
+            }
+            
+        }
+    }
+} 
