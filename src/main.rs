@@ -145,8 +145,7 @@ fn bits_to_letters(bits: u32) -> String {
 }
 
 fn setup_word_list(mut wordlist: ResMut<WordList>) {
-    let words_path = "assets/words/dict_words.txt";
-    let file_contents = fs::read_to_string(words_path).expect("Was not able to read word list");
+    let file_contents = include_str!("../assets/words/dict_words.txt");
 
     for word in file_contents.split_whitespace() {
         if is_valid_word(word) {
